@@ -1,0 +1,29 @@
+{
+  "name": "claude-context-guard",
+  "version": "1.0.0",
+  "description": "Monitor Claude Code session health via read-to-edit ratio",
+  "main": "src/index.js",
+  "bin": {
+    "claude-context-guard": "src/cli.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node src/cli.js status"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai",
+    "context",
+    "monitor",
+    "hooks"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
