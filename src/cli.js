@@ -88,7 +88,7 @@ function cmdCheck() {
       process.stderr.write('║  2️⃣  Escribe /new      → Nueva sesión desde cero     ║\n');
       process.stderr.write('╚══════════════════════════════════════════════════════╝\n');
       process.stderr.write('\n');
-      process.exit(1);
+      process.exit(0);
     }
 
     process.exit(0);
