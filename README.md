@@ -27,10 +27,8 @@ Reads the JSONL session files Claude Code already saves in `~/.claude/projects/`
 When the ratio drops below a safe threshold, you get an alert:
 
 ```
-WARNING: claude-context-guard: Context quality dropping
-    Read-to-edit ratio: 1.8 (healthy: >4.0)
-    Claude is editing without reading enough context.
-    Consider running /compact or starting a fresh session.
+⚠️  Claude lleva mucho rato trabajando y puede estar perdiendo el hilo.
+    Escribe /compact en el chat para que se ponga al día.
 ```
 
 You can also run it manually at any time:
@@ -39,16 +37,19 @@ You can also run it manually at any time:
 claude-context-guard status
 ```
 
-Output:
+Output when healthy:
 
 ```
-Session Quality Report
-──────────────────────────
-Read-to-edit ratio:  2.1  !!  (degraded)
-Total tool calls:    87
-File edits:          23
-Files read:          48
-Recommendation:      Run /compact now or start a new session
+🟢  Claude está trabajando bien en esta sesión.
+```
+
+Output when degraded:
+
+```
+🔴  Claude está perdiendo contexto — puede cometer errores.
+
+    → Escribe /compact en el chat para que se ponga al día.
+    → O empieza una sesión nueva si el problema persiste.
 ```
 
 ---
