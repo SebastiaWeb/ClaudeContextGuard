@@ -4,10 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Try both known settings paths; prefer ~/.claude/settings.json
+// Try all known settings paths across platforms; prefer ~/.claude/settings.json
 const SETTINGS_CANDIDATES = [
-  path.join(os.homedir(), '.claude', 'settings.json'),
-  path.join(os.homedir(), '.config', 'claude', 'settings.json'),
+  path.join(os.homedir(), '.claude', 'settings.json'),           // macOS / Linux
+  path.join(os.homedir(), '.config', 'claude', 'settings.json'), // Linux alt
+  ...(process.env.APPDATA
+    ? [path.join(process.env.APPDATA, 'Claude', 'settings.json')]
+    : []),                                                         // Windows
 ];
 
 const HOOK_COMMAND = 'npx claude-context-guard check';

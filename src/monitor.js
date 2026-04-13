@@ -12,7 +12,9 @@ const EDIT_TOOLS = new Set(['Edit', 'Write']);
  * e.g. /Users/foo/bar -> -Users-foo-bar
  */
 function cwdToDirname(cwd) {
-  return cwd.replace(/\//g, '-').replace(/^-/, '-');
+  // Normalise both Unix forward slashes and Windows backslashes to dashes.
+  // Leading separator becomes a leading dash: /Users/foo -> -Users-foo
+  return cwd.replace(/[/\\]/g, '-');
 }
 
 /**
