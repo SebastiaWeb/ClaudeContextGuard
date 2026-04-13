@@ -1,6 +1,6 @@
 {
   "name": "claude-context-guard",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Monitor Claude Code session health via read-to-edit ratio",
   "main": "src/index.js",
   "bin": {

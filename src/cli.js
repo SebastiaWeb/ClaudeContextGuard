@@ -12,16 +12,6 @@ function formatRatio(ratio) {
   return ratio.toFixed(1);
 }
 
-function ratioStatus(ratio, min) {
-  if (ratio === null) return '';
-  return ratio >= min ? 'healthy' : 'degraded';
-}
-
-function ratioIcon(ratio, min) {
-  if (ratio === null) return '';
-  return ratio >= min ? 'OK' : '!!';
-}
-
 // ── commands ──────────────────────────────────────────────────────────────────
 
 function cmdStatus() {
@@ -29,28 +19,27 @@ function cmdStatus() {
   const result = analyseLatestSession(cwd);
 
   if (!result) {
-    console.log('No session data found for current directory.');
-    console.log('Make sure Claude Code has been run in this directory.');
+    console.log('');
+    console.log('No hay datos de sesión para este directorio.');
+    console.log('Asegúrate de haber usado Claude Code aquí primero.');
+    console.log('');
     process.exit(0);
   }
 
-  const { reads, edits, totalToolCalls, ratio, filePath } = result;
-  const status = ratioStatus(ratio, config.minReadToEditRatio);
-  const icon = ratioIcon(ratio, config.minReadToEditRatio);
+  const { edits, ratio } = result;
+  const degraded = ratio !== null && ratio < config.minReadToEditRatio && edits >= config.alertAfterEdits;
 
   console.log('');
-  console.log('Session Quality Report');
-  console.log('──────────────────────────');
-  console.log(`Read-to-edit ratio:  ${formatRatio(ratio)}  ${icon}  (${status || 'no edits yet'})`);
-  console.log(`Total tool calls:    ${totalToolCalls}`);
-  console.log(`File edits:          ${edits}`);
-  console.log(`Files read:          ${reads}`);
-
-  if (ratio !== null && ratio < config.minReadToEditRatio && edits >= config.alertAfterEdits) {
-    console.log(`Recommendation:      Run /compact now or start a new session`);
+  if (ratio === null || edits < config.alertAfterEdits) {
+    console.log('🟢  Claude está trabajando bien en esta sesión.');
+  } else if (!degraded) {
+    console.log('🟢  Claude está trabajando bien en esta sesión.');
+  } else {
+    console.log('🔴  Claude está perdiendo contexto — puede cometer errores.');
+    console.log('');
+    console.log('    → Escribe /compact en el chat para que se ponga al día.');
+    console.log('    → O empieza una sesión nueva si el problema persiste.');
   }
-
-  console.log(`Session file:        ${filePath}`);
   console.log('');
 }
 
@@ -87,10 +76,8 @@ function cmdCheck() {
 
     if (ratio < config.minReadToEditRatio) {
       process.stderr.write('\n');
-      process.stderr.write('WARNING: claude-context-guard: Context quality dropping\n');
-      process.stderr.write(`    Read-to-edit ratio: ${formatRatio(ratio)} (healthy: >${config.minReadToEditRatio})\n`);
-      process.stderr.write('    Claude is editing without reading enough context.\n');
-      process.stderr.write('    Consider running /compact or starting a fresh session.\n');
+      process.stderr.write('⚠️  Claude lleva mucho rato trabajando y puede estar perdiendo el hilo.\n');
+      process.stderr.write('    Escribe /compact en el chat para que se ponga al día.\n');
       process.stderr.write('\n');
       process.exit(1);
     }
