@@ -136,12 +136,12 @@ function cmdStatusline() {
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', (chunk) => { raw += chunk; });
   process.stdin.on('end', () => {
-    let hookCwd = cwd;
     let contextPct = null;
+    let transcriptPath = null;
 
     try {
       const data = JSON.parse(raw);
-      if (data.cwd) hookCwd = data.cwd;
+      if (data.transcript_path) transcriptPath = data.transcript_path;
       if (data.context_window && data.context_window.used_percentage != null) {
         contextPct = data.context_window.used_percentage;
       }
@@ -150,7 +150,45 @@ function cmdStatusline() {
     }
 
     const config = loadConfig();
-    const result = analyseLatestSession(hookCwd);
+    const { parseSession } = require('./monitor');
+
+    // Use transcript_path directly if available — avoids cwd mismatch issues
+    let result = null;
+    if (transcriptPath) {
+      const stats = parseSession(transcriptPath);
+      if (stats) {
+        const ratio = stats.edits === 0 ? null : stats.reads / stats.edits;
+        result = Object.assign({ ratio, filePath: transcriptPath }, stats);
+      }
+    }
+
+    // Fallback: find the most recently modified JSONL across all projects
+    if (!result) {
+      const projectsDir = require('path').join(require('os').homedir(), '.claude', 'projects');
+      try {
+        const fs = require('fs');
+        let newest = null;
+        let newestMtime = 0;
+        for (const proj of fs.readdirSync(projectsDir)) {
+          const projPath = require('path').join(projectsDir, proj);
+          try {
+            for (const f of fs.readdirSync(projPath)) {
+              if (!f.endsWith('.jsonl')) continue;
+              const fp = require('path').join(projPath, f);
+              const mtime = fs.statSync(fp).mtimeMs;
+              if (mtime > newestMtime) { newestMtime = mtime; newest = fp; }
+            }
+          } catch { /* skip */ }
+        }
+        if (newest) {
+          const stats = parseSession(newest);
+          if (stats) {
+            const ratio = stats.edits === 0 ? null : stats.reads / stats.edits;
+            result = Object.assign({ ratio, filePath: newest }, stats);
+          }
+        }
+      } catch { /* no projects dir */ }
+    }
 
     // ── build progress bar ──────────────────────────────────────────────────
     function makeBar(pct, width, colorFn) {
