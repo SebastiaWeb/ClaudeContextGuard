@@ -87,7 +87,7 @@ function install() {
 
   // Statusline
   if (settings?.statusLine?.command !== STATUSLINE_COMMAND) {
-    settings.statusLine = { type: 'command', command: STATUSLINE_COMMAND };
+    settings.statusLine = { type: 'command', command: STATUSLINE_COMMAND, refreshInterval: 5 };
   }
 
   writeSettings(settingsPath, settings);
