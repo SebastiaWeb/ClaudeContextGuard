@@ -1,8 +1,10 @@
 # claude-context-guard
 
 [![npm version](https://img.shields.io/npm/v/claude-context-guard.svg)](https://www.npmjs.com/package/claude-context-guard)
+[![npm downloads](https://img.shields.io/npm/dw/claude-context-guard.svg)](https://www.npmjs.com/package/claude-context-guard)
 [![license](https://img.shields.io/npm/l/claude-context-guard.svg)](LICENSE)
 [![node](https://img.shields.io/node/v/claude-context-guard.svg)](package.json)
+[![GitHub](https://img.shields.io/badge/repo-GitHub-blue)](https://github.com/SebastiaWeb/ClaudeContextGuard)
 
 > Know when Claude is degrading — before the damage is done.
 

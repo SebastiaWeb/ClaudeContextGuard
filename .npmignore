@@ -1,2 +1,10 @@
 .gitignore
+.github/
 context-guard-README.md
+*.map
+*.tgz
+.DS_Store
+node_modules/
+coverage/
+.env
+.env.*
