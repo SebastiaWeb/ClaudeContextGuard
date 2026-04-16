@@ -1,15 +1,44 @@
 #!/usr/bin/env node
 'use strict';
 
-const { analyseLatestSession } = require('./monitor');
+const { execSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const { analyseLatestSession, parseSessionDetailed } = require('./monitor');
+const { analyse: runAnalysis } = require('./analysis');
 const { install, uninstall } = require('./hooks');
 const { load: loadConfig, configPath } = require('./config');
 
 const cwd = process.cwd();
+const CACHE_FILE = path.join(os.homedir(), '.claude', 'context-guard.cache.json');
 
-function formatRatio(ratio) {
-  if (ratio === null) return 'N/A';
-  return ratio.toFixed(1);
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+function getGitBranch(dir) {
+  try {
+    return execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd: dir, timeout: 500, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch { return null; }
+}
+
+function makeBar(pct, width, colorFn) {
+  const filled = Math.round((pct / 100) * width);
+  const empty = width - filled;
+  return colorFn('█'.repeat(filled)) + '\x1b[90m' + '░'.repeat(empty) + '\x1b[0m';
+}
+
+const green  = (s) => `\x1b[32m${s}\x1b[0m`;
+const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
+const red    = (s) => `\x1b[31m${s}\x1b[0m`;
+const dim    = (s) => `\x1b[90m${s}\x1b[0m`;
+
+function scoreColor(score) {
+  if (score >= 75) return green;
+  if (score >= 40) return yellow;
+  return red;
 }
 
 // ── commands ──────────────────────────────────────────────────────────────────
@@ -20,8 +49,8 @@ function cmdStatus() {
 
   if (!result) {
     console.log('');
-    console.log('No hay datos de sesión para este directorio.');
-    console.log('Asegúrate de haber usado Claude Code aquí primero.');
+    console.log('No session data found for this directory.');
+    console.log('Make sure you have used Claude Code here first.');
     console.log('');
     process.exit(0);
   }
@@ -30,27 +59,21 @@ function cmdStatus() {
   const degraded = ratio !== null && ratio < config.minReadToEditRatio && edits >= config.alertAfterEdits;
 
   console.log('');
-  if (ratio === null || edits < config.alertAfterEdits) {
-    console.log('🟢  Claude está trabajando bien en esta sesión.');
-  } else if (!degraded) {
-    console.log('🟢  Claude está trabajando bien en esta sesión.');
+  if (!degraded) {
+    console.log('🟢  Claude is working well in this session.');
   } else {
-    console.log('🔴  Claude está perdiendo contexto — puede cometer errores.');
+    console.log('🔴  Claude is losing context — errors may follow.');
     console.log('');
-    console.log('    → Escribe /compact en el chat para que se ponga al día.');
-    console.log('    → O empieza una sesión nueva si el problema persiste.');
+    console.log('    → Type /compact to bring Claude up to speed.');
+    console.log('    → Or start a new session if the problem persists.');
   }
   console.log('');
 }
 
 function cmdCheck() {
-  // Called by Claude Code hook via stdin; read JSON then analyse.
-  // Alerts go to stderr to avoid interfering with hook processing.
   const config = loadConfig();
 
-  const timeout = setTimeout(() => {
-    process.exit(0);
-  }, 2000);
+  const timeout = setTimeout(() => { process.exit(0); }, 2000);
   timeout.unref();
 
   let raw = '';
@@ -58,37 +81,62 @@ function cmdCheck() {
   process.stdin.on('data', (chunk) => { raw += chunk; });
   process.stdin.on('end', () => {
     let hookCwd = cwd;
+    let contextPct = null;
+    let transcriptPath = null;
+
     try {
       const data = JSON.parse(raw);
       if (data.cwd) hookCwd = data.cwd;
-    } catch {
-      // ignore parse errors — use process.cwd()
+      if (data.transcript_path) transcriptPath = data.transcript_path;
+      if (data.context_window && data.context_window.used_percentage != null) {
+        contextPct = data.context_window.used_percentage;
+      }
+    } catch { /* ignore */ }
+
+    // Try transcript_path first, fallback to cwd-based lookup
+    let detailed = null;
+    if (transcriptPath) {
+      detailed = parseSessionDetailed(transcriptPath);
     }
+    if (!detailed) {
+      const result = analyseLatestSession(hookCwd);
+      if (!result) process.exit(0);
+      detailed = parseSessionDetailed(result.filePath);
+    }
+    if (!detailed) process.exit(0);
 
-    const result = analyseLatestSession(hookCwd);
-    if (!result) process.exit(0);
-
-    const { reads, edits, ratio } = result;
+    const analysis = runAnalysis(detailed, contextPct, config);
+    const { slidingWindow, compositeScore, blindEdits, thrashing } = analysis;
 
     if (config.silent) process.exit(0);
-    if (edits < config.alertAfterEdits) process.exit(0);
-    if (ratio === null) process.exit(0);
+    const totalMods = analysis.edits + analysis.writes;
+    if (totalMods < config.alertAfterEdits) process.exit(0);
 
-    if (ratio < config.minReadToEditRatio) {
-      const editWord = edits === 1 ? 'edición' : 'ediciones';
+    if (compositeScore < 50) {
+      const ratioStr = slidingWindow.ratio === null ? 'N/A' : slidingWindow.ratio.toFixed(1) + 'x';
       process.stderr.write('\n');
-      process.stderr.write('╔══════════════════════════════════════════════════════╗\n');
-      process.stderr.write('║  ⚠️  Claude está perdiendo el hilo de la conversación  ║\n');
-      process.stderr.write('╠══════════════════════════════════════════════════════╣\n');
-      process.stderr.write(`║  📊 ${edits} ${editWord}, ${reads} lecturas (ratio ${ratio.toFixed(1)}x)`.padEnd(55) + '║\n');
-      process.stderr.write('╠══════════════════════════════════════════════════════╣\n');
-      process.stderr.write('║  Qué hacer ahora:                                    ║\n');
-      process.stderr.write('║                                                      ║\n');
-      process.stderr.write('║  1️⃣  Escribe /compact  → Claude resume y continúa    ║\n');
-      process.stderr.write('║  2️⃣  Escribe /new      → Nueva sesión desde cero     ║\n');
-      process.stderr.write('╚══════════════════════════════════════════════════════╝\n');
+      process.stderr.write('╔═══════════════════════════════════════════════════════════╗\n');
+      process.stderr.write('║  ⚠️  Claude is losing track of the conversation            ║\n');
+      process.stderr.write('╠═══════════════════════════════════════════════════════════╣\n');
+      process.stderr.write(`║  📊 Score: ${compositeScore}/100  ratio: ${ratioStr}  edits: ${totalMods}  reads: ${analysis.reads}`.padEnd(60) + '║\n');
+
+      if (blindEdits.blindEditCount > 0) {
+        process.stderr.write(`║  👁  ${blindEdits.blindEditCount} blind edits (no prior read)`.padEnd(60) + '║\n');
+      }
+      if (thrashing.thrashingFiles.length > 0) {
+        process.stderr.write(`║  🔄 ${thrashing.thrashingFiles.length} file(s) edited 3+ times (thrashing)`.padEnd(60) + '║\n');
+      }
+      if (analysis.writes > 0) {
+        process.stderr.write(`║  📝 ${analysis.writes} full rewrites (Write instead of Edit)`.padEnd(60) + '║\n');
+      }
+
+      process.stderr.write('╠═══════════════════════════════════════════════════════════╣\n');
+      process.stderr.write('║  What to do now:                                          ║\n');
+      process.stderr.write('║                                                           ║\n');
+      process.stderr.write('║  1️⃣  Type /compact  → Claude summarizes and continues      ║\n');
+      process.stderr.write('║  2️⃣  Type /new      → Start a fresh session                ║\n');
+      process.stderr.write('╚═══════════════════════════════════════════════════════════╝\n');
       process.stderr.write('\n');
-      process.exit(0);
     }
 
     process.exit(0);
@@ -112,6 +160,8 @@ function cmdUninstall() {
   } else {
     console.log('Uninstalled successfully.');
   }
+  // Clean up cache
+  try { fs.unlinkSync(CACHE_FILE); } catch { /* ignore */ }
   console.log(`Settings: ${result.settingsPath}`);
 }
 
@@ -126,10 +176,7 @@ function cmdConfig() {
 }
 
 function cmdStatusline() {
-  // Reads JSON from stdin (Claude Code statusline format) and prints one line.
-  const timeout = setTimeout(() => {
-    process.exit(0);
-  }, 2000);
+  const timeout = setTimeout(() => { process.exit(0); }, 2000);
   timeout.unref();
 
   let raw = '';
@@ -138,97 +185,86 @@ function cmdStatusline() {
   process.stdin.on('end', () => {
     let contextPct = null;
     let transcriptPath = null;
+    let hookCwd = null;
 
     try {
       const data = JSON.parse(raw);
       if (data.transcript_path) transcriptPath = data.transcript_path;
+      if (data.cwd) hookCwd = data.cwd;
       if (data.context_window && data.context_window.used_percentage != null) {
         contextPct = data.context_window.used_percentage;
       }
-    } catch {
-      // use defaults
-    }
-
-    const config = loadConfig();
-    const { parseSession } = require('./monitor');
-    const fs = require('fs');
-    const os = require('os');
-    const path = require('path');
-    const CACHE_FILE = path.join(os.homedir(), '.claude', 'context-guard.cache.json');
+    } catch { /* use defaults */ }
 
     // Persist session data so refreshInterval calls (no stdin) can reuse it
     if (transcriptPath) {
       try {
-        fs.writeFileSync(CACHE_FILE, JSON.stringify({ transcriptPath, contextPct }), 'utf8');
+        fs.writeFileSync(CACHE_FILE, JSON.stringify({ transcriptPath, contextPct, hookCwd }), 'utf8');
       } catch { /* ignore */ }
     } else {
-      // Fallback: use last known data from cache
       try {
         const cached = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
         if (cached.transcriptPath) transcriptPath = cached.transcriptPath;
         if (contextPct === null && cached.contextPct != null) contextPct = cached.contextPct;
+        if (!hookCwd && cached.hookCwd) hookCwd = cached.hookCwd;
       } catch { /* ignore */ }
     }
 
-    let result = null;
+    const config = loadConfig();
+
+    // ── analyse session ─────────────────────────────────────────────────────
+    let analysis = null;
     if (transcriptPath) {
-      const stats = parseSession(transcriptPath);
-      if (stats) {
-        const ratio = stats.edits === 0 ? null : stats.reads / stats.edits;
-        result = Object.assign({ ratio, filePath: transcriptPath }, stats);
+      const detailed = parseSessionDetailed(transcriptPath);
+      if (detailed) {
+        analysis = runAnalysis(detailed, contextPct, config);
       }
     }
 
-    // ── build progress bar ──────────────────────────────────────────────────
-    function makeBar(pct, width, colorFn) {
-      const filled = Math.round((pct / 100) * width);
-      const empty = width - filled;
-      return colorFn('█'.repeat(filled)) + '\x1b[90m' + '░'.repeat(empty) + '\x1b[0m';
-    }
+    // ── quality bar ─────────────────────────────────────────────────────────
+    let qualityPart = '';
+    if (analysis) {
+      const { compositeScore, slidingWindow, blindEdits, thrashing, writes } = analysis;
+      const colorFn = scoreColor(compositeScore);
+      const bar = makeBar(compositeScore, 10, colorFn);
+      const ratioStr = slidingWindow.ratio === null ? 'N/A' : `${slidingWindow.ratio.toFixed(1)}x`;
+      const label = colorFn('🧠 Quality');
 
-    // ANSI color helpers
-    const green  = (s) => `\x1b[32m${s}\x1b[0m`;
-    const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
-    const red    = (s) => `\x1b[31m${s}\x1b[0m`;
+      qualityPart = `${label} [${bar}] ${compositeScore}/100  ratio:${ratioStr}`;
 
-    function ratioColor(ratio, minRatio) {
-      if (ratio === null) return green;
-      const pct = Math.min(ratio / minRatio, 1); // 1.0 = perfect, 0 = fully degraded
-      if (pct >= 0.75) return green;
-      if (pct >= 0.4)  return yellow;
-      return red;
-    }
+      // Extra indicators when problems detected
+      const extras = [];
+      if (blindEdits.blindEditCount > 0) extras.push(`blind:${blindEdits.blindEditCount}`);
+      if (thrashing.thrashingFiles.length > 0) extras.push(`thrash:${thrashing.thrashingFiles.length}`);
+      if (writes > 0) extras.push(`writes:${writes}`);
+      if (extras.length > 0) qualityPart += '  ' + dim(extras.join(' '));
 
-    // ── ratio bar ───────────────────────────────────────────────────────────
-    let ratioLine = '';
-    if (result) {
-      const { reads, edits, ratio } = result;
-      const colorFn = ratioColor(ratio, config.minReadToEditRatio);
-
-      // ratio as percentage of healthy threshold (capped at 100%)
-      const ratioPct = ratio === null ? 100 : Math.min((ratio / config.minReadToEditRatio) * 100, 100);
-      const bar = makeBar(ratioPct, 10, colorFn);
-
-      const ratioStr = ratio === null ? 'N/A' : `${ratio.toFixed(1)}x`;
-      const label = colorFn(`🧠 Quality`);
-      ratioLine = `${label} [${bar}] ratio:${ratioStr}  edits:${edits}  reads:${reads}`;
-
-      if (ratio !== null && ratio < config.minReadToEditRatio && edits >= config.alertAfterEdits) {
-        ratioLine += '  ' + red('⚠ /compact');
+      if (compositeScore < 40) {
+        qualityPart += '  ' + red('⚠ /compact');
       }
     } else {
-      ratioLine = `\x1b[90m🧠 Quality [${makeBar(100, 10, green)}] no data yet\x1b[0m`;
+      qualityPart = dim(`🧠 Quality [${makeBar(100, 10, green)}] no data yet`);
     }
 
     // ── context bar ─────────────────────────────────────────────────────────
-    let contextLine = '';
+    let contextPart = '';
     if (contextPct !== null) {
       const ctxColorFn = contextPct < 50 ? green : contextPct < 80 ? yellow : red;
       const bar = makeBar(contextPct, 10, ctxColorFn);
-      contextLine = `📦 Context [${bar}] ${contextPct}%`;
+      contextPart = `📦 Context [${bar}] ${Math.round(contextPct)}%`;
     }
 
-    const output = [ratioLine, contextLine].filter(Boolean).join('  ·  ');
+    // ── git branch + directory ──────────────────────────────────────────────
+    let gitPart = '';
+    const dir = hookCwd || cwd;
+    const branch = getGitBranch(dir);
+    if (branch) gitPart = `🌿 ${green(branch)}`;
+
+    let dirPart = '';
+    const dirName = path.basename(dir);
+    if (dirName) dirPart = `📁 ${dirName}`;
+
+    const output = [qualityPart, contextPart, gitPart, dirPart].filter(Boolean).join('  ·  ');
     process.stdout.write(output + '\n');
     process.exit(0);
   });
@@ -241,7 +277,7 @@ function cmdHelp() {
   console.log('Commands:');
   console.log('  status      Show session quality report for current directory');
   console.log('  check       Hook mode: read stdin JSON and alert if degraded');
-  console.log('  statusline  Statusline mode: print one-line quality bar for Claude Code');
+  console.log('  statusline  Print color progress bar for Claude Code statusline');
   console.log('  install     Add hooks and statusline to ~/.claude/settings.json');
   console.log('  uninstall   Remove hooks and statusline from ~/.claude/settings.json');
   console.log('  config      Show current configuration');
@@ -254,12 +290,12 @@ function cmdHelp() {
 const command = process.argv[2] || 'help';
 
 switch (command) {
-  case 'status':    cmdStatus();    break;
+  case 'status':     cmdStatus();     break;
   case 'check':      cmdCheck();      break;
   case 'statusline': cmdStatusline(); break;
   case 'install':    cmdInstall();    break;
-  case 'uninstall': cmdUninstall(); break;
-  case 'config':    cmdConfig();    break;
+  case 'uninstall':  cmdUninstall();  break;
+  case 'config':     cmdConfig();     break;
   case 'help':
   default:
     cmdHelp();

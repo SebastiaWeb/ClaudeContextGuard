@@ -4,16 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const READ_TOOLS = new Set(['Read', 'Glob', 'Grep']);
-const EDIT_TOOLS = new Set(['Edit', 'Write']);
+const READ_TOOLS  = new Set(['Read', 'Glob', 'Grep']);
+const EDIT_TOOLS  = new Set(['Edit']);
+const WRITE_TOOLS = new Set(['Write']);
 
 /**
  * Convert an absolute cwd path to the dirname format Claude uses.
  * e.g. /Users/foo/bar -> -Users-foo-bar
  */
 function cwdToDirname(cwd) {
-  // Normalise both Unix forward slashes and Windows backslashes to dashes.
-  // Leading separator becomes a leading dash: /Users/foo -> -Users-foo
   return cwd.replace(/[/\\]/g, '-');
 }
 
@@ -49,19 +48,45 @@ function listSessions(cwd) {
 }
 
 /**
- * Extract tool_use names from a content array.
+ * Get the file path from a tool_use input object.
  */
-function extractToolNames(contentArray) {
-  if (!Array.isArray(contentArray)) return [];
-  return contentArray
-    .filter((c) => c && c.type === 'tool_use' && typeof c.name === 'string')
-    .map((c) => c.name);
+function getFilePath(_toolName, input) {
+  if (!input) return null;
+  if (input.file_path) return input.file_path;   // Read, Edit, Write
+  if (input.path) return input.path;               // Glob, Grep
+  return null;
 }
 
 /**
- * Parse a single JSONL file and return { reads, edits, totalToolCalls }.
+ * Classify a tool name into a category.
  */
-function parseSession(filePath) {
+function categorize(name) {
+  if (READ_TOOLS.has(name)) return 'read';
+  if (EDIT_TOOLS.has(name)) return 'edit';
+  if (WRITE_TOOLS.has(name)) return 'write';
+  return 'other';
+}
+
+/**
+ * Extract structured tool events from a content array.
+ * Returns [{ name, category, filePath }]
+ */
+function extractToolEvents(contentArray) {
+  if (!Array.isArray(contentArray)) return [];
+  return contentArray
+    .filter((c) => c && c.type === 'tool_use' && typeof c.name === 'string')
+    .map((c) => ({
+      name: c.name,
+      category: categorize(c.name),
+      filePath: getFilePath(c.name, c.input) || null,
+    }));
+}
+
+/**
+ * Parse a single JSONL file and return detailed event data.
+ * Returns { events, reads, edits, writes, totalToolCalls } or null.
+ */
+function parseSessionDetailed(filePath) {
   let raw;
   try {
     raw = fs.readFileSync(filePath, 'utf8');
@@ -69,8 +94,10 @@ function parseSession(filePath) {
     return null;
   }
 
+  const events = [];
   let reads = 0;
   let edits = 0;
+  let writes = 0;
   let totalToolCalls = 0;
 
   for (const line of raw.split('\n')) {
@@ -84,14 +111,11 @@ function parseSession(filePath) {
       continue;
     }
 
+    let contentArray = null;
+
     // Assistant entries: message.content[]
     if (entry.type === 'assistant' && entry.message && entry.message.content) {
-      const names = extractToolNames(entry.message.content);
-      for (const name of names) {
-        totalToolCalls++;
-        if (READ_TOOLS.has(name)) reads++;
-        else if (EDIT_TOOLS.has(name)) edits++;
-      }
+      contentArray = entry.message.content;
     }
 
     // Progress entries (sub-agents): data.message.message.content[]
@@ -102,21 +126,40 @@ function parseSession(filePath) {
       entry.data.message.message &&
       entry.data.message.message.content
     ) {
-      const names = extractToolNames(entry.data.message.message.content);
-      for (const name of names) {
+      contentArray = entry.data.message.message.content;
+    }
+
+    if (contentArray) {
+      const toolEvents = extractToolEvents(contentArray);
+      for (const evt of toolEvents) {
+        evt.index = totalToolCalls;
+        events.push(evt);
         totalToolCalls++;
-        if (READ_TOOLS.has(name)) reads++;
-        else if (EDIT_TOOLS.has(name)) edits++;
+        if (evt.category === 'read') reads++;
+        else if (evt.category === 'edit') edits++;
+        else if (evt.category === 'write') writes++;
       }
     }
   }
 
-  return { reads, edits, totalToolCalls };
+  return { events, reads, edits, writes, totalToolCalls };
+}
+
+/**
+ * Backward-compatible wrapper. Returns { reads, edits, totalToolCalls } or null.
+ */
+function parseSession(filePath) {
+  const detailed = parseSessionDetailed(filePath);
+  if (!detailed) return null;
+  return {
+    reads: detailed.reads,
+    edits: detailed.edits + detailed.writes,
+    totalToolCalls: detailed.totalToolCalls,
+  };
 }
 
 /**
  * Analyse the most recent session for a given cwd.
- * Returns { reads, edits, totalToolCalls, ratio, filePath } or null.
  */
 function analyseLatestSession(cwd) {
   const sessions = listSessions(cwd);
@@ -130,4 +173,11 @@ function analyseLatestSession(cwd) {
   return Object.assign({ ratio, filePath }, stats);
 }
 
-module.exports = { analyseLatestSession, listSessions, parseSession, projectDir, cwdToDirname };
+module.exports = {
+  analyseLatestSession,
+  listSessions,
+  parseSession,
+  parseSessionDetailed,
+  projectDir,
+  cwdToDirname,
+};

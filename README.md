@@ -24,39 +24,56 @@ The result: bugs introduced, working code broken, architectural decisions ignore
 
 ## What This Does
 
-Reads the JSONL session files Claude Code already saves in `~/.claude/projects/` and calculates your session's **read-to-edit ratio in real time**.
+Monitors Claude Code sessions using **5 degradation signals** to give you a composite quality score (0-100) in real time.
 
 ### Live statusline bar
 
-A color-coded bar appears at the bottom of Claude Code after every response, showing quality and context usage at a glance:
+A color-coded bar at the bottom of Claude Code shows your session health at a glance:
 
 ```
-🧠 Quality [██████████] ratio:6.2x  edits:5  reads:31  ·  📦 Context [███░░░░░░░] 30%
+🧠 Quality [████████░░] 82/100  ratio:5.2x  ·  📦 Context [███░░░░░░░] 30%  ·  🌿 main  ·  📁 my-project
 ```
 
-The bars change color as the session progresses:
+When things start to degrade, extra indicators appear:
 
-| Color | Meaning |
+```
+🧠 Quality [███░░░░░░░] 28/100  ratio:1.2x  blind:5 thrash:2 writes:3  ⚠ /compact  ·  📦 Context [███████░░░] 68%  ·  🌿 feat/auth  ·  📁 my-project
+```
+
+| Color | Score | Meaning |
+|---|---|---|
+| 🟢 Green | 75-100 | Healthy — Claude is reading enough context |
+| 🟡 Yellow | 40-74 | Starting to degrade — watch out |
+| 🔴 Red + `⚠ /compact` | 0-39 | Degraded — take action now |
+
+### 5 degradation signals
+
+| Signal | What it detects |
 |---|---|
-| 🟢 Green | Healthy — Claude is reading enough context |
-| 🟡 Yellow | Starting to degrade — watch out |
-| 🔴 Red + `⚠ /compact` | Degraded — take action now |
+| **Sliding window ratio** | Read-to-edit ratio over the last 20 tool calls (not the whole session) |
+| **Blind edits** | Edits made without reading the file first |
+| **Thrashing** | Same file edited 3+ times in a short window |
+| **Write frequency** | Full file rewrites (`Write`) instead of surgical edits (`Edit`) |
+| **Context pressure** | Quality score penalized as context window fills up |
 
 ### Alert when it gets bad
 
-When the ratio drops below the safe threshold, you also get a full alert after every Claude response or file edit:
+When the composite score drops below 50, you get a full alert:
 
 ```
-╔══════════════════════════════════════════════════════╗
-║  ⚠️  Claude is losing track of the conversation       ║
-╠══════════════════════════════════════════════════════╣
-║  📊 15 edits, 8 reads (ratio 0.5x)                   ║
-╠══════════════════════════════════════════════════════╣
-║  What to do now:                                     ║
-║                                                      ║
-║  1️⃣  Type /compact  → Claude summarizes and continues ║
-║  2️⃣  Type /new      → Start a fresh session          ║
-╚══════════════════════════════════════════════════════╝
+╔═══════════════════════════════════════════════════════════╗
+║  ⚠️  Claude is losing track of the conversation            ║
+╠═══════════════════════════════════════════════════════════╣
+║  📊 Score: 28/100  ratio: 1.2x  edits: 15  reads: 8      ║
+║  👁  5 blind edits (no prior read)                         ║
+║  🔄 2 file(s) edited 3+ times (thrashing)                  ║
+║  📝 3 full rewrites (Write instead of Edit)                ║
+╠═══════════════════════════════════════════════════════════╣
+║  What to do now:                                          ║
+║                                                           ║
+║  1️⃣  Type /compact  → Claude summarizes and continues      ║
+║  2️⃣  Type /new      → Start a fresh session                ║
+╚═══════════════════════════════════════════════════════════╝
 ```
 
 You can also check manually at any time:
@@ -105,9 +122,10 @@ Tool calls are classified as:
 | Category | Tools |
 |---|---|
 | Read | `Read`, `Glob`, `Grep` |
-| Edit | `Edit`, `Write` |
+| Edit | `Edit` |
+| Write | `Write` (full file rewrite) |
 
-The **read-to-edit ratio** is `reads / edits`. A ratio below 4.0 indicates Claude may be operating with insufficient context.
+A **composite quality score** (0-100) is computed from: sliding window ratio, blind edits, thrashing, write frequency, and context pressure.
 
 The check runs automatically in three moments:
 - **Statusline** — live bar at the bottom of Claude Code after every response
@@ -131,15 +149,21 @@ Customize thresholds in `~/.claude/context-guard.json`:
 {
   "minReadToEditRatio": 4.0,
   "alertAfterEdits": 10,
-  "silent": false
+  "silent": false,
+  "slidingWindowSize": 20,
+  "blindEditLookback": 10,
+  "thrashingThreshold": 3
 }
 ```
 
 | Option | Default | Description |
 |---|---|---|
-| `minReadToEditRatio` | `4.0` | Alert when ratio drops below this |
+| `minReadToEditRatio` | `4.0` | Target ratio for healthy sessions |
 | `alertAfterEdits` | `10` | Start monitoring after N edits |
 | `silent` | `false` | Suppress terminal alerts |
+| `slidingWindowSize` | `20` | Number of recent tool calls to evaluate |
+| `blindEditLookback` | `10` | How many tool calls back to check for prior reads |
+| `thrashingThreshold` | `3` | Edits on same file before flagging thrashing |
 
 ---
 
@@ -167,16 +191,21 @@ const guard = require('claude-context-guard');
 
 // Analyse the current session
 const result = guard.analyse('/path/to/project');
-// => { reads: 48, edits: 23, totalToolCalls: 87, ratio: 2.08, filePath: '...' }
-// => null  (no session data found)
+// => {
+//   reads: 48, edits: 18, writes: 5, totalToolCalls: 87,
+//   compositeScore: 72,
+//   slidingWindow: { reads: 12, edits: 4, writes: 1, ratio: 2.4, total: 20 },
+//   blindEdits: { blindEditCount: 3, blindEditFiles: [...] },
+//   thrashing: { thrashingFiles: [], maxEditsOnOneFile: 2 },
+//   filePath: '...'
+// }
 
-// Install/uninstall the hook
+// Install/uninstall hooks and statusline
 guard.installHook();
 guard.uninstallHook();
 
 // Read current config
 const config = guard.getConfig();
-// => { minReadToEditRatio: 4.0, alertAfterEdits: 10, silent: false }
 ```
 
 ---
@@ -185,10 +214,10 @@ const config = guard.getConfig();
 
 | Before | After |
 |---|---|
-| Claude degrades silently | Live color bar shows quality at all times |
-| Bugs appear out of nowhere | Catch degradation before damage |
+| Claude degrades silently | Live quality score (0-100) with 5 degradation signals |
+| Bugs appear out of nowhere | Catch blind edits and thrashing before damage |
 | Wasted time fixing AI-introduced bugs | Know exactly when to reset the session |
-| No visibility into session health | Live read-to-edit ratio + context % |
+| No visibility into session health | Ratio, context %, git branch, and directory at a glance |
 
 ---
 
