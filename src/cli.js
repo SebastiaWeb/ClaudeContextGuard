@@ -41,6 +41,137 @@ function scoreColor(score) {
   return red;
 }
 
+// ── responsive layout ────────────────────────────────────────────────────────
+
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+// Emoji ranges covering glyphs used in this file (🧠 📦 🌿 📁 ⚠)
+const EMOJI_RE = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{27BF}\u{1F000}-\u{1F2FF}]/gu;
+
+// Measure visible terminal columns: strip ANSI, count codepoints, treat emoji as 2 cols.
+function visibleLength(s) {
+  const noAnsi = s.replace(ANSI_RE, '');
+  const emojiCount = (noAnsi.match(EMOJI_RE) || []).length;
+  return Array.from(noAnsi).length + emojiCount;
+}
+
+function getTerminalWidth() {
+  // Interactive stdout (direct CLI usage) — fastest path.
+  if (process.stdout.isTTY && process.stdout.columns) return process.stdout.columns;
+
+  // Claude Code pipes stdin/stdout, so /dev/tty is the only reliable source of
+  // the real terminal size. `tput cols` falls back to 80 when stdout is piped.
+  try {
+    const result = execSync('stty size < /dev/tty', {
+      timeout: 300, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'],
+    }).trim();
+    const cols = parseInt(result.split(/\s+/)[1], 10);
+    if (!isNaN(cols) && cols > 0) return cols;
+  } catch { /* ignore */ }
+
+  const envCols = parseInt(process.env.COLUMNS, 10);
+  if (!isNaN(envCols) && envCols > 0) return envCols;
+
+  try {
+    const cols = parseInt(execSync('tput cols', {
+      timeout: 300, encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'],
+    }).trim(), 10);
+    if (!isNaN(cols) && cols > 0) return cols;
+  } catch { /* ignore */ }
+
+  return 80;
+}
+
+function getBreakpoint(width) {
+  if (width >= 100) return 'full';
+  if (width >= 80) return 'medium';
+  if (width >= 60) return 'narrow';
+  return 'tiny';
+}
+
+const BAR_WIDTHS = { full: 10, medium: 8, narrow: 6, tiny: 4 };
+
+function buildQualityCore(analysis, bp) {
+  const barW = BAR_WIDTHS[bp];
+
+  if (!analysis) {
+    return dim(`🧠 Quality [${makeBar(100, barW, green)}] no data yet`);
+  }
+
+  const { compositeScore } = analysis;
+  const colorFn = scoreColor(compositeScore);
+  const bar = makeBar(compositeScore, barW, colorFn);
+  const label = bp === 'tiny' ? colorFn('🧠') : colorFn('🧠 Quality');
+
+  let core = `${label} [${bar}] ${compositeScore}/100`;
+  // Critical alert stays glued to the core — must never be separated from the score.
+  if (compositeScore < 40) {
+    core += '  ' + red(bp === 'tiny' ? '⚠' : '⚠ /compact');
+  }
+  return core;
+}
+
+// Pack chunks greedily into lines of `width`, wrapping when a chunk doesn't fit.
+// Nothing is dropped — narrow terminals show everything across multiple lines.
+function packLines(chunks, width, sep) {
+  const sepLen = visibleLength(sep);
+  const lines = [];
+  let current = '';
+  let currentLen = 0;
+  for (const chunk of chunks) {
+    const chunkLen = visibleLength(chunk);
+    const addedLen = current ? sepLen + chunkLen : chunkLen;
+    if (current && currentLen + addedLen > width) {
+      lines.push(current);
+      current = chunk;
+      currentLen = chunkLen;
+    } else {
+      current += (current ? sep : '') + chunk;
+      currentLen += addedLen;
+    }
+  }
+  if (current) lines.push(current);
+  return lines.join('\n');
+}
+
+function renderStatusline({ analysis, contextPct, hookCwd, width }) {
+  const bp = getBreakpoint(width);
+  const barW = BAR_WIDTHS[bp];
+  const sep = '  ·  ';
+  const compact = bp === 'narrow' || bp === 'tiny';
+
+  const chunks = [buildQualityCore(analysis, bp)];
+
+  if (analysis) {
+    const { slidingWindow, blindEdits, thrashing, bashFailures, writes } = analysis;
+
+    const ratioStr = slidingWindow.ratio === null ? 'N/A' : `${slidingWindow.ratio.toFixed(1)}x`;
+    chunks.push(dim(compact ? `r:${ratioStr}` : `ratio:${ratioStr}`));
+
+    const extras = [];
+    if (blindEdits.blindEditCount > 0) extras.push(compact ? `b${blindEdits.blindEditCount}` : `blind:${blindEdits.blindEditCount}`);
+    if (thrashing.thrashingFiles.length > 0) extras.push(compact ? `t${thrashing.thrashingFiles.length}` : `thrash:${thrashing.thrashingFiles.length}`);
+    if (bashFailures.maxConsecutive >= 3) extras.push(compact ? `f${bashFailures.maxConsecutive}` : `bash-fail:${bashFailures.maxConsecutive}`);
+    if (writes > 0) extras.push(compact ? `w${writes}` : `writes:${writes}`);
+    if (extras.length > 0) chunks.push(dim(extras.join(' ')));
+  }
+
+  if (contextPct !== null) {
+    const ctxColorFn = contextPct < 50 ? green : contextPct < 80 ? yellow : red;
+    const bar = makeBar(contextPct, barW, ctxColorFn);
+    const label = bp === 'tiny' ? '📦' : '📦 Context';
+    chunks.push(`${label} [${bar}] ${Math.round(contextPct)}%`);
+  }
+
+  const dir = hookCwd || cwd;
+  const branch = getGitBranch(dir);
+  if (branch) chunks.push(`🌿 ${green(branch)}`);
+
+  const dirName = path.basename(dir);
+  if (dirName) chunks.push(`📁 ${dirName}`);
+
+  return packLines(chunks, width, sep);
+}
+
 // ── commands ──────────────────────────────────────────────────────────────────
 
 function cmdStatus() {
@@ -246,51 +377,9 @@ function cmdStatusline() {
     // Save cache
     try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cached), 'utf8'); } catch { /* ignore */ }
 
-    // ── quality bar ─────────────────────────────────────────────────────────
-    let qualityPart = '';
-    if (analysis) {
-      const { compositeScore, slidingWindow, blindEdits, thrashing, bashFailures, writes } = analysis;
-      const colorFn = scoreColor(compositeScore);
-      const bar = makeBar(compositeScore, 10, colorFn);
-      const ratioStr = slidingWindow.ratio === null ? 'N/A' : `${slidingWindow.ratio.toFixed(1)}x`;
-      const label = colorFn('🧠 Quality');
-
-      qualityPart = `${label} [${bar}] ${compositeScore}/100  ratio:${ratioStr}`;
-
-      // Extra indicators when problems detected
-      const extras = [];
-      if (blindEdits.blindEditCount > 0) extras.push(`blind:${blindEdits.blindEditCount}`);
-      if (thrashing.thrashingFiles.length > 0) extras.push(`thrash:${thrashing.thrashingFiles.length}`);
-      if (bashFailures.maxConsecutive >= 3) extras.push(`bash-fail:${bashFailures.maxConsecutive}`);
-      if (writes > 0) extras.push(`writes:${writes}`);
-      if (extras.length > 0) qualityPart += '  ' + dim(extras.join(' '));
-
-      if (compositeScore < 40) {
-        qualityPart += '  ' + red('⚠ /compact');
-      }
-    } else {
-      qualityPart = dim(`🧠 Quality [${makeBar(100, 10, green)}] no data yet`);
-    }
-
-    // ── context bar ─────────────────────────────────────────────────────────
-    let contextPart = '';
-    if (contextPct !== null) {
-      const ctxColorFn = contextPct < 50 ? green : contextPct < 80 ? yellow : red;
-      const bar = makeBar(contextPct, 10, ctxColorFn);
-      contextPart = `📦 Context [${bar}] ${Math.round(contextPct)}%`;
-    }
-
-    // ── git branch + directory ──────────────────────────────────────────────
-    let gitPart = '';
-    const dir = hookCwd || cwd;
-    const branch = getGitBranch(dir);
-    if (branch) gitPart = `🌿 ${green(branch)}`;
-
-    let dirPart = '';
-    const dirName = path.basename(dir);
-    if (dirName) dirPart = `📁 ${dirName}`;
-
-    const output = [qualityPart, contextPart, gitPart, dirPart].filter(Boolean).join('  ·  ');
+    // ── render with adaptive width ──────────────────────────────────────────
+    const width = getTerminalWidth();
+    const output = renderStatusline({ analysis, contextPct, hookCwd, width });
     process.stdout.write(output + '\n');
     process.exit(0);
   });
