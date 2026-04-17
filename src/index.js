@@ -4,6 +4,7 @@ const monitor = require('./monitor');
 const analysis = require('./analysis');
 const hooks = require('./hooks');
 const config = require('./config');
+const handoff = require('./handoff');
 
 /**
  * Analyse the most recent Claude Code session for the given directory.
@@ -50,4 +51,12 @@ function getConfig() {
   return config.load();
 }
 
-module.exports = { analyse, installHook, uninstallHook, getConfig };
+/**
+ * Generate a handoff markdown file from the latest session transcript.
+ * See handoff.generateHandoff for the full option shape.
+ */
+function generateHandoffMd(opts) {
+  return handoff.generateHandoff(opts);
+}
+
+module.exports = { analyse, installHook, uninstallHook, getConfig, generateHandoff: generateHandoffMd };

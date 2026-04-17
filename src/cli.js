@@ -10,6 +10,7 @@ const { analyseLatestSession, parseSessionDetailed } = require('./monitor');
 const { analyse: runAnalysis } = require('./analysis');
 const { install, uninstall } = require('./hooks');
 const { load: loadConfig, configPath } = require('./config');
+const { generateHandoff } = require('./handoff');
 
 const cwd = process.cwd();
 const CACHE_FILE = path.join(os.homedir(), '.claude', 'context-guard.cache.json');
@@ -101,7 +102,8 @@ function cmdCheck() {
     if (!detailed) {
       const result = analyseLatestSession(hookCwd);
       if (!result) process.exit(0);
-      detailed = parseSessionDetailed(result.filePath);
+      transcriptPath = result.filePath;
+      detailed = parseSessionDetailed(transcriptPath);
     }
     if (!detailed) process.exit(0);
 
@@ -149,6 +151,34 @@ function cmdCheck() {
       process.stderr.write('║  2️⃣  Type /new      → Start a fresh session                ║\n');
       process.stderr.write('╚═══════════════════════════════════════════════════════════╝\n');
       process.stderr.write('\n');
+    }
+
+    // Handoff trigger: at critical degradation, generate a session-handoff MD that
+    // the next /new session will auto-load via the SessionStart hook.
+    if (compositeScore < 20 && transcriptPath) {
+      const handoffPath = path.join(hookCwd, '.claude', 'handoff.md');
+      let skip = false;
+      try {
+        const stat = fs.statSync(handoffPath);
+        // Don't regenerate if a fresh handoff already exists (< 5 min old).
+        if (Date.now() - stat.mtimeMs < 5 * 60 * 1000) skip = true;
+      } catch { /* no existing handoff, proceed */ }
+
+      if (!skip) {
+        const result = generateHandoff({
+          transcriptPath,
+          cwd: hookCwd,
+          analysis,
+          sessionId: path.basename(transcriptPath, '.jsonl'),
+        });
+        if (result && result.path) {
+          process.stderr.write('\n');
+          process.stderr.write('📄 \x1b[33mHandoff saved for fresh-session recovery:\x1b[0m\n');
+          process.stderr.write(`   ${result.path}\n`);
+          process.stderr.write('   Type /new — context will auto-load into the fresh session.\n');
+          process.stderr.write('\n');
+        }
+      }
     }
 
     process.exit(0);
@@ -296,18 +326,102 @@ function cmdStatusline() {
   });
 }
 
+function cmdHandoff() {
+  // Manual trigger: generate a handoff MD from the latest session in this cwd.
+  const result = analyseLatestSession(cwd);
+  if (!result) {
+    console.log('');
+    console.log('No session data found for this directory.');
+    console.log('Make sure you have used Claude Code here first.');
+    console.log('');
+    process.exit(0);
+  }
+
+  const config = loadConfig();
+  const detailed = parseSessionDetailed(result.filePath);
+  if (!detailed) {
+    console.log('Could not parse transcript.');
+    process.exit(1);
+  }
+
+  const analysis = runAnalysis(detailed, null, config, {});
+  const out = generateHandoff({
+    transcriptPath: result.filePath,
+    cwd,
+    analysis,
+    sessionId: path.basename(result.filePath, '.jsonl'),
+  });
+
+  if (out.error) {
+    console.error('Handoff failed:', out.error);
+    process.exit(1);
+  }
+
+  console.log('');
+  console.log(`📄 Handoff saved: ${out.path}`);
+  console.log(`   Size: ${out.bytes} bytes`);
+  console.log('');
+  console.log('   Type /new in Claude Code — the SessionStart hook will auto-load it.');
+  console.log('');
+}
+
+function cmdSessionStart() {
+  // Runs as Claude Code's SessionStart hook. If a .claude/handoff.md exists,
+  // emit its contents as `additionalContext` in the documented JSON format so
+  // the fresh session ingests the handoff before processing any user input.
+  const timeout = setTimeout(() => { process.exit(0); }, 2000);
+  timeout.unref();
+
+  let raw = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => { raw += chunk; });
+  process.stdin.on('end', () => {
+    let hookCwd = cwd;
+    try {
+      const data = JSON.parse(raw);
+      if (data.cwd) hookCwd = data.cwd;
+    } catch { /* ignore */ }
+
+    // One-shot semantics via filesystem: the handoff.md only exists if a prior
+    // degraded session generated it. After injection we rename it, so any
+    // subsequent SessionStart (startup / clear / resume / compact) is a no-op
+    // until a new handoff is written. This keeps the hook source-agnostic.
+    const handoffPath = path.join(hookCwd, '.claude', 'handoff.md');
+    let content;
+    try { content = fs.readFileSync(handoffPath, 'utf8'); } catch { process.exit(0); }
+
+    const payload = {
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart',
+        additionalContext: content,
+      },
+    };
+    process.stdout.write(JSON.stringify(payload));
+
+    // One-shot consumption: move to a .consumed suffix so a later session
+    // doesn't re-inject the same handoff, but the user can still inspect it.
+    try {
+      fs.renameSync(handoffPath, path.join(hookCwd, '.claude', 'handoff.consumed.md'));
+    } catch { /* ignore */ }
+
+    process.exit(0);
+  });
+}
+
 function cmdHelp() {
   console.log('');
   console.log('Usage: claude-context-guard <command>');
   console.log('');
   console.log('Commands:');
-  console.log('  status      Show session quality report for current directory');
-  console.log('  check       Hook mode: read stdin JSON and alert if degraded');
-  console.log('  statusline  Print color progress bar for Claude Code statusline');
-  console.log('  install     Add hooks and statusline to ~/.claude/settings.json');
-  console.log('  uninstall   Remove hooks and statusline from ~/.claude/settings.json');
-  console.log('  config      Show current configuration');
-  console.log('  help        Show this help message');
+  console.log('  status         Show session quality report for current directory');
+  console.log('  check          Hook mode: read stdin JSON and alert if degraded');
+  console.log('  statusline     Print color progress bar for Claude Code statusline');
+  console.log('  handoff        Generate a handoff MD from the current session (manual trigger)');
+  console.log('  session-start  Hook mode: read stdin and inject .claude/handoff.md if present');
+  console.log('  install        Add hooks and statusline to ~/.claude/settings.json');
+  console.log('  uninstall      Remove hooks and statusline from ~/.claude/settings.json');
+  console.log('  config         Show current configuration');
+  console.log('  help           Show this help message');
   console.log('');
 }
 
@@ -316,6 +430,8 @@ function cmdHelp() {
 const command = process.argv[2] || 'help';
 
 switch (command) {
+  case 'handoff':       cmdHandoff();      break;
+  case 'session-start': cmdSessionStart(); break;
   case 'status':     cmdStatus();     break;
   case 'check':      cmdCheck();      break;
   case 'statusline': cmdStatusline(); break;

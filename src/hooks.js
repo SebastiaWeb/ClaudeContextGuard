@@ -16,6 +16,7 @@ const SETTINGS_CANDIDATES = [
 const HOOK_COMMAND = 'npx claude-context-guard check';
 const HOOK_MATCHER = 'Edit|Write';
 const STATUSLINE_COMMAND = 'npx claude-context-guard statusline';
+const SESSIONSTART_COMMAND = 'npx claude-context-guard session-start';
 
 function resolveSettingsPath() {
   for (const p of SETTINGS_CANDIDATES) {
@@ -54,6 +55,7 @@ function isInstalled(settings) {
   return (
     hasHookCommand(settings?.hooks?.PostToolUse, HOOK_COMMAND) &&
     hasHookCommand(settings?.hooks?.Stop, HOOK_COMMAND) &&
+    hasHookCommand(settings?.hooks?.SessionStart, SESSIONSTART_COMMAND) &&
     settings?.statusLine?.command === STATUSLINE_COMMAND
   );
 }
@@ -85,6 +87,14 @@ function install() {
     });
   }
 
+  // SessionStart hook (auto-load handoff.md into fresh sessions)
+  if (!hasHookCommand(settings.hooks.SessionStart, SESSIONSTART_COMMAND)) {
+    if (!Array.isArray(settings.hooks.SessionStart)) settings.hooks.SessionStart = [];
+    settings.hooks.SessionStart.push({
+      hooks: [{ type: 'command', command: SESSIONSTART_COMMAND }],
+    });
+  }
+
   // Statusline
   if (settings?.statusLine?.command !== STATUSLINE_COMMAND) {
     settings.statusLine = { type: 'command', command: STATUSLINE_COMMAND, refreshInterval: 5 };
@@ -113,8 +123,9 @@ function uninstall() {
 
   const hadPostToolUse = hasHookCommand(settings?.hooks?.PostToolUse, HOOK_COMMAND);
   const hadStop = hasHookCommand(settings?.hooks?.Stop, HOOK_COMMAND);
+  const hadSessionStart = hasHookCommand(settings?.hooks?.SessionStart, SESSIONSTART_COMMAND);
 
-  if (!hadPostToolUse && !hadStop) {
+  if (!hadPostToolUse && !hadStop && !hadSessionStart) {
     return { wasInstalled: false, settingsPath };
   }
 
@@ -125,6 +136,9 @@ function uninstall() {
 
   settings.hooks.Stop = removeHookCommand(settings.hooks.Stop, HOOK_COMMAND);
   if (settings.hooks.Stop.length === 0) delete settings.hooks.Stop;
+
+  settings.hooks.SessionStart = removeHookCommand(settings.hooks.SessionStart, SESSIONSTART_COMMAND);
+  if (settings.hooks.SessionStart.length === 0) delete settings.hooks.SessionStart;
 
   if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
 
