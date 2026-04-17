@@ -24,7 +24,7 @@ The result: bugs introduced, working code broken, architectural decisions ignore
 
 ## What This Does
 
-Monitors Claude Code sessions using **5 degradation signals** to give you a composite quality score (0-100) in real time.
+Monitors Claude Code sessions using **7 degradation signals** with EMA smoothing to give you a stable composite quality score (0-100) in real time.
 
 ### Live statusline bar
 
@@ -46,15 +46,17 @@ When things start to degrade, extra indicators appear:
 | 🟡 Yellow | 40-74 | Starting to degrade — watch out |
 | 🔴 Red + `⚠ /compact` | 0-39 | Degraded — take action now |
 
-### 5 degradation signals
+### 7 degradation signals
 
 | Signal | What it detects |
 |---|---|
-| **Sliding window ratio** | Read-to-edit ratio over the last 20 tool calls (not the whole session) |
-| **Blind edits** | Edits made without reading the file first |
+| **EMA-smoothed ratio** | Read-to-edit ratio using exponential moving average — no more score jumps |
+| **Blind edits** | Edits made without reading the file first (windowed, ignores new file creation) |
 | **Thrashing** | Same file edited 3+ times in a short window |
 | **Write frequency** | Full file rewrites (`Write`) instead of surgical edits (`Edit`) |
-| **Context pressure** | Quality score penalized as context window fills up |
+| **Context pressure** | Sigmoid curve — degrades smoothly from 40%, drops steeply after 65% |
+| **Bash failures** | Same command failing 3+ times consecutively |
+| **Autocompact detection** | Resets score smoothing when context drops suddenly (>30%) |
 
 ### Alert when it gets bad
 
@@ -150,7 +152,7 @@ Customize thresholds in `~/.claude/context-guard.json`:
   "minReadToEditRatio": 4.0,
   "alertAfterEdits": 10,
   "silent": false,
-  "slidingWindowSize": 20,
+  "slidingWindowSize": 40,
   "blindEditLookback": 10,
   "thrashingThreshold": 3
 }
@@ -214,7 +216,7 @@ const config = guard.getConfig();
 
 | Before | After |
 |---|---|
-| Claude degrades silently | Live quality score (0-100) with 5 degradation signals |
+| Claude degrades silently | Live quality score (0-100) with 7 degradation signals |
 | Bugs appear out of nowhere | Catch blind edits and thrashing before damage |
 | Wasted time fixing AI-introduced bugs | Know exactly when to reset the session |
 | No visibility into session health | Ratio, context %, git branch, and directory at a glance |

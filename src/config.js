@@ -10,7 +10,7 @@ const DEFAULTS = {
   minReadToEditRatio: 4.0,
   alertAfterEdits: 10,
   silent: false,
-  slidingWindowSize: 20,
+  slidingWindowSize: 40,
   blindEditLookback: 10,
   thrashingThreshold: 3,
 };

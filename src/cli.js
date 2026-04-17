@@ -105,7 +105,19 @@ function cmdCheck() {
     }
     if (!detailed) process.exit(0);
 
-    const analysis = runAnalysis(detailed, contextPct, config);
+    // Load cache for EMA continuity
+    let cached = {};
+    try { cached = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch { /* ignore */ }
+    const analysisCache = {
+      emaRatio: cached.emaRatio != null ? cached.emaRatio : null,
+      prevScore: cached.prevScore != null ? cached.prevScore : null,
+      prevContextPct: cached.prevContextPct != null ? cached.prevContextPct : null,
+    };
+    const analysis = runAnalysis(detailed, contextPct, config, analysisCache);
+
+    // Persist updated cache
+    Object.assign(cached, analysis._cache);
+    try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cached), 'utf8'); } catch { /* ignore */ }
     const { slidingWindow, compositeScore, blindEdits, thrashing } = analysis;
 
     if (config.silent) process.exit(0);
@@ -196,18 +208,19 @@ function cmdStatusline() {
       }
     } catch { /* use defaults */ }
 
-    // Persist session data so refreshInterval calls (no stdin) can reuse it
+    // Load previous cache (EMA state, score, session data)
+    let cached = {};
+    try { cached = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch { /* ignore */ }
+
+    // Restore from cache when refreshInterval fires without stdin
     if (transcriptPath) {
-      try {
-        fs.writeFileSync(CACHE_FILE, JSON.stringify({ transcriptPath, contextPct, hookCwd }), 'utf8');
-      } catch { /* ignore */ }
+      cached.transcriptPath = transcriptPath;
+      cached.contextPct = contextPct;
+      cached.hookCwd = hookCwd;
     } else {
-      try {
-        const cached = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
-        if (cached.transcriptPath) transcriptPath = cached.transcriptPath;
-        if (contextPct === null && cached.contextPct != null) contextPct = cached.contextPct;
-        if (!hookCwd && cached.hookCwd) hookCwd = cached.hookCwd;
-      } catch { /* ignore */ }
+      if (cached.transcriptPath) transcriptPath = cached.transcriptPath;
+      if (contextPct === null && cached.contextPct != null) contextPct = cached.contextPct;
+      if (!hookCwd && cached.hookCwd) hookCwd = cached.hookCwd;
     }
 
     const config = loadConfig();
@@ -217,14 +230,26 @@ function cmdStatusline() {
     if (transcriptPath) {
       const detailed = parseSessionDetailed(transcriptPath);
       if (detailed) {
-        analysis = runAnalysis(detailed, contextPct, config);
+        // Pass previous EMA/score state from cache
+        const analysisCache = {
+          emaRatio: cached.emaRatio != null ? cached.emaRatio : null,
+          prevScore: cached.prevScore != null ? cached.prevScore : null,
+          prevContextPct: cached.prevContextPct != null ? cached.prevContextPct : null,
+        };
+        analysis = runAnalysis(detailed, contextPct, config, analysisCache);
+
+        // Persist updated cache
+        Object.assign(cached, analysis._cache);
       }
     }
+
+    // Save cache
+    try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cached), 'utf8'); } catch { /* ignore */ }
 
     // ── quality bar ─────────────────────────────────────────────────────────
     let qualityPart = '';
     if (analysis) {
-      const { compositeScore, slidingWindow, blindEdits, thrashing, writes } = analysis;
+      const { compositeScore, slidingWindow, blindEdits, thrashing, bashFailures, writes } = analysis;
       const colorFn = scoreColor(compositeScore);
       const bar = makeBar(compositeScore, 10, colorFn);
       const ratioStr = slidingWindow.ratio === null ? 'N/A' : `${slidingWindow.ratio.toFixed(1)}x`;
@@ -236,6 +261,7 @@ function cmdStatusline() {
       const extras = [];
       if (blindEdits.blindEditCount > 0) extras.push(`blind:${blindEdits.blindEditCount}`);
       if (thrashing.thrashingFiles.length > 0) extras.push(`thrash:${thrashing.thrashingFiles.length}`);
+      if (bashFailures.maxConsecutive >= 3) extras.push(`bash-fail:${bashFailures.maxConsecutive}`);
       if (writes > 0) extras.push(`writes:${writes}`);
       if (extras.length > 0) qualityPart += '  ' + dim(extras.join(' '));
 
