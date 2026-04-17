@@ -39,15 +39,29 @@ function contextMultiplier(ctxPct) {
 
 function computeSlidingWindow(events, windowSize) {
   const window = events.slice(-windowSize);
-  let reads = 0, edits = 0, writes = 0;
+  let reads = 0, edits = 0, writes = 0, newFileWrites = 0;
   for (const evt of window) {
     if (evt.category === 'read') reads++;
     else if (evt.category === 'edit') edits++;
-    else if (evt.category === 'write') writes++;
+    else if (evt.category === 'write') {
+      writes++;
+      // A write to a file never read in the session = new file creation, not a rewrite.
+      // Exclude it from the writePenalty so legitimate scaffolding doesn't tank the score.
+      if (evt.filePath) {
+        const writePath = path.resolve(evt.filePath);
+        const everRead = events.some(e =>
+          e.category === 'read' && e.filePath &&
+          path.resolve(e.filePath) === writePath
+        );
+        if (!everRead) newFileWrites++;
+      } else {
+        newFileWrites++;
+      }
+    }
   }
   const totalMods = edits + writes;
   const ratio = totalMods === 0 ? null : reads / totalMods;
-  return { reads, edits, writes, ratio, total: window.length };
+  return { reads, edits, writes, newFileWrites, ratio, total: window.length };
 }
 
 // ── EMA ratio ────────────────────────────────────────────────────────────────
@@ -202,9 +216,11 @@ function computeCompositeScore({ emaRatio, slidingWindow, blindEdits, thrashing,
     baseScore = Math.min(emaAsRatio / config.minReadToEditRatio, 1.0) * 100;
   }
 
-  // Write penalty
+  // Write penalty — only count writes that rewrite existing files.
+  // Creating brand-new files is legitimate scaffolding, not a "full rewrite" signal.
   const totalMods = slidingWindow.edits + slidingWindow.writes;
-  const writePct = totalMods === 0 ? 0 : slidingWindow.writes / totalMods;
+  const rewriteCount = slidingWindow.writes - (slidingWindow.newFileWrites || 0);
+  const writePct = totalMods === 0 ? 0 : rewriteCount / totalMods;
   const writePenalty = writePct * 15;
 
   // Blind edit penalty
@@ -247,9 +263,14 @@ function analyse(detailed, contextPct, config, cache) {
 
   if (cache.prevContextPct != null && contextPct != null) {
     if (cache.prevContextPct - contextPct > 30) {
-      // Autocompact detected — reset smoothing
+      // Autocompact (or manual /compact) detected. A large context drop means Claude
+      // just got a fresh runway — the session is effectively healthier, not worse.
+      // Reset the EMA so stale read/edit history doesn't bias the ratio, and floor
+      // the smoothed score at 75 so the user visibly sees the recovery instead of
+      // dropping to the raw value (which still carries penalties from pre-compact
+      // events still in the sliding window).
       prevEma = null;
-      prevScore = null;
+      prevScore = Math.max(prevScore != null ? prevScore : 0, 75);
     }
   }
 
