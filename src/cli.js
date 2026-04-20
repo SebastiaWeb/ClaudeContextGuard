@@ -11,6 +11,7 @@ const { analyse: runAnalysis } = require('./analysis');
 const { install, uninstall } = require('./hooks');
 const { load: loadConfig, configPath } = require('./config');
 const { generateHandoff } = require('./handoff');
+const { discoverSkills, summarize: summariseSkills } = require('./skills');
 
 const cwd = process.cwd();
 const CACHE_FILE = path.join(os.homedir(), '.claude', 'context-guard.cache.json');
@@ -134,7 +135,28 @@ function packLines(chunks, width, sep) {
   return lines.join('\n');
 }
 
-function renderStatusline({ analysis, contextPct, hookCwd, width }) {
+// Compact skill chunk for the statusline. Shows active/inactive counts at
+// narrow widths and a few active skill names as the terminal gets wider.
+function buildSkillsChunk(skills, bp) {
+  if (!skills || skills.total === 0) return null;
+  const { active, inactive, total } = skills;
+  const a = active.length;
+  const i = inactive.length;
+
+  if (bp === 'tiny') return dim(`🧩 ${a}/${total}`);
+  if (bp === 'narrow') return dim(`🧩 ${a}✓ ${i}✗`);
+
+  // Wider breakpoints: show actual active names, budget depending on width.
+  const maxNames = bp === 'full' ? 5 : 2;
+  const shown = active.slice(0, maxNames);
+  const overflow = a - shown.length;
+  const namesStr = shown.length > 0 ? shown.join(', ') : '(none)';
+  const overflowStr = overflow > 0 ? ` +${overflow}` : '';
+  const inactiveStr = i > 0 ? `  ${dim('✗' + i)}` : '';
+  return `🧩 ${green('✓')} ${namesStr}${overflowStr}${inactiveStr}`;
+}
+
+function renderStatusline({ analysis, contextPct, hookCwd, width, skills }) {
   const bp = getBreakpoint(width);
   const barW = BAR_WIDTHS[bp];
   const sep = '  ·  ';
@@ -162,6 +184,9 @@ function renderStatusline({ analysis, contextPct, hookCwd, width }) {
     const label = bp === 'tiny' ? '📦' : '📦 Context';
     chunks.push(`${label} [${bar}] ${Math.round(contextPct)}%`);
   }
+
+  const skillChunk = buildSkillsChunk(skills, bp);
+  if (skillChunk) chunks.push(skillChunk);
 
   const dir = hookCwd || cwd;
   const branch = getGitBranch(dir);
@@ -404,12 +429,25 @@ function cmdStatusline() {
       }
     }
 
+    // ── skills summary (TTL-cached; disk scan is cheap but statusline runs often) ──
+    let skills = null;
+    const now = Date.now();
+    if (cached.skillsCache && now - (cached.skillsCache.at || 0) < 30_000) {
+      skills = cached.skillsCache.value;
+    } else {
+      try {
+        const discovery = discoverSkills({ transcriptPath });
+        skills = summariseSkills(discovery);
+        cached.skillsCache = { at: now, value: skills };
+      } catch { /* skills are best-effort; never block statusline */ }
+    }
+
     // Save cache
     try { fs.writeFileSync(CACHE_FILE, JSON.stringify(cached), 'utf8'); } catch { /* ignore */ }
 
     // ── render with adaptive width ──────────────────────────────────────────
     const width = getTerminalWidth();
-    const output = renderStatusline({ analysis, contextPct, hookCwd, width });
+    const output = renderStatusline({ analysis, contextPct, hookCwd, width, skills });
     process.stdout.write(output + '\n');
     process.exit(0);
   });
@@ -497,6 +535,70 @@ function cmdSessionStart() {
   });
 }
 
+function cmdSkills() {
+  const result = analyseLatestSession(cwd);
+  const transcriptPath = result ? result.filePath : null;
+  const discovery = discoverSkills({ transcriptPath });
+  const summary = summariseSkills(discovery);
+
+  const active   = discovery.skills.filter((s) => s.source !== 'builtin' && s.active);
+  const inactive = discovery.skills.filter((s) => s.source !== 'builtin' && !s.active);
+  const builtins = discovery.skills.filter((s) => s.source === 'builtin');
+
+  const pad = (s, n) => (s.length >= n ? s : s + ' '.repeat(n - s.length));
+  const truncate = (s, n) => (s.length <= n ? s : s.slice(0, n - 1) + '…');
+
+  console.log('');
+  console.log(`Skills discovered: ${summary.total} on disk (${summary.active.length} active, ${summary.inactive.length} inactive)` +
+    (summary.builtinCount ? `, ${summary.builtinCount} built-in loaded by Claude Code` : ''));
+  console.log('');
+
+  if (active.length > 0) {
+    console.log(`\x1b[32m✓ ACTIVE (${active.length})\x1b[0m`);
+    for (const s of active) {
+      const mark = s.loaded === true ? '\x1b[32m●\x1b[0m' : s.loaded === false ? '\x1b[31m○\x1b[0m' : '\x1b[90m·\x1b[0m';
+      const origin = s.source === 'user' ? 'user' : `plugin:${s.plugin}`;
+      console.log(`  ${mark} ${pad(s.name, 32)} ${pad(origin, 28)} ${truncate(s.description, 60)}`);
+    }
+    console.log('');
+  }
+
+  if (inactive.length > 0) {
+    console.log(`\x1b[31m✗ INACTIVE (${inactive.length}) — plugin not enabled in settings.json\x1b[0m`);
+    for (const s of inactive) {
+      const origin = `plugin:${s.plugin}`;
+      console.log(`    ${pad(s.name, 32)} ${pad(origin, 28)} ${truncate(s.description, 60)}`);
+    }
+    console.log('');
+  }
+
+  if (builtins.length > 0) {
+    console.log(`\x1b[90m◆ BUILT-IN (${builtins.length}) — shipped with Claude Code, always available\x1b[0m`);
+    for (const s of builtins) console.log(`  \x1b[90m·\x1b[0m ${s.name}`);
+    console.log('');
+  }
+
+  console.log('─── Validation ───');
+  const v = discovery.validation;
+  if (!v.available) {
+    console.log(`  ⚠ Could not verify skill loading: ${v.reason}`);
+    console.log('  (Open Claude Code in this directory, then run this command again.)');
+  } else {
+    console.log(`  ✓ Last session loaded \x1b[1m${v.loadedCount}\x1b[0m skills (${v.activeOnDiskCount} match active-on-disk).`);
+    if (v.missing.length > 0) {
+      console.log(`  ⚠ On disk & active but NOT loaded: ${v.missing.join(', ')}`);
+      console.log('    → Check plugin install state or restart Claude Code.');
+    }
+    if (v.extra.length > 0) {
+      console.log(`  ℹ Loaded but not found on disk (built-in): ${v.extra.slice(0, 5).join(', ')}${v.extra.length > 5 ? ` +${v.extra.length - 5}` : ''}`);
+    }
+    if (v.missing.length === 0 && v.extra.length === 0) {
+      console.log('  ✓ Disk state and Claude Code load state match.');
+    }
+  }
+  console.log('');
+}
+
 function cmdHelp() {
   console.log('');
   console.log('Usage: claude-context-guard <command>');
@@ -505,6 +607,7 @@ function cmdHelp() {
   console.log('  status         Show session quality report for current directory');
   console.log('  check          Hook mode: read stdin JSON and alert if degraded');
   console.log('  statusline     Print color progress bar for Claude Code statusline');
+  console.log('  skills         List active/inactive skills and validate last-session load');
   console.log('  handoff        Generate a handoff MD from the current session (manual trigger)');
   console.log('  session-start  Hook mode: read stdin and inject .claude/handoff.md if present');
   console.log('  install        Add hooks and statusline to ~/.claude/settings.json');
@@ -521,6 +624,7 @@ const command = process.argv[2] || 'help';
 switch (command) {
   case 'handoff':       cmdHandoff();      break;
   case 'session-start': cmdSessionStart(); break;
+  case 'skills':     cmdSkills();     break;
   case 'status':     cmdStatus();     break;
   case 'check':      cmdCheck();      break;
   case 'statusline': cmdStatusline(); break;

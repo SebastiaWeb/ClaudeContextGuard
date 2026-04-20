@@ -5,6 +5,7 @@ const analysis = require('./analysis');
 const hooks = require('./hooks');
 const config = require('./config');
 const handoff = require('./handoff');
+const skills = require('./skills');
 
 /**
  * Analyse the most recent Claude Code session for the given directory.
@@ -59,4 +60,20 @@ function generateHandoffMd(opts) {
   return handoff.generateHandoff(opts);
 }
 
-module.exports = { analyse, installHook, uninstallHook, getConfig, generateHandoff: generateHandoffMd };
+/**
+ * Discover skills available to Claude Code (user + plugin + built-in) and,
+ * when a transcript path is provided, validate which ones were loaded in
+ * the last session. See skills.discoverSkills for the full option shape.
+ */
+function discoverSkills(opts) {
+  return skills.discoverSkills(opts || {});
+}
+
+module.exports = {
+  analyse,
+  installHook,
+  uninstallHook,
+  getConfig,
+  generateHandoff: generateHandoffMd,
+  discoverSkills,
+};
