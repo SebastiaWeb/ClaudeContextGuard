@@ -177,14 +177,24 @@ Customize thresholds in `~/.claude/context-guard.json`:
 Usage: claude-context-guard <command>
 
 Commands:
-  status      Show session quality report for current directory
-  check       Hook mode: read stdin JSON and alert if degraded
-  statusline  Print color progress bar for Claude Code statusline
-  install     Add hooks and statusline to ~/.claude/settings.json
-  uninstall   Remove hooks and statusline from ~/.claude/settings.json
-  config      Show current configuration
-  help        Show this help message
+  status         Show session quality report for current directory
+  check          Hook mode: read stdin JSON and alert if degraded
+  statusline     Print color progress bar for Claude Code statusline
+  skills         List active/inactive skills and validate last-session load
+  handoff        Generate a handoff MD from the current session (manual trigger)
+  session-start  Hook mode: read stdin and inject .claude/handoff.md if present
+  install        Add hooks and statusline to ~/.claude/settings.json
+  uninstall      Remove hooks and statusline from ~/.claude/settings.json
+  config         Show current configuration
+  help           Show this help message
 ```
+
+### Skills visibility
+
+The statusline includes a `🧩` chunk summarising which Claude Code skills are
+active vs. inactive in your setup, and `claude-context-guard skills` prints a
+full report including which skills were actually loaded into the most recent
+session (so you can catch a plugin that silently stopped loading).
 
 ---
 
